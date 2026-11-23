@@ -58,12 +58,31 @@ const num = (s: string) => {
   return m ? Number(m[0]) : NaN;
 };
 
+// Запасной путь: AI-бот CRM пишет адрес, м² и пожелания в «Заметку о клиенте» свободным текстом.
+// Фраза кончается на «;», перенос строки или точку перед новым предложением («кв. 51» не обрывается).
+// Точка после сокращений («ул. Абая», «пр. Достык», «д. 3») конец фразы не означает.
+const ABBR = String.raw`(?<!(?:^|[\s,(])(?:ул|пр|пр-т|просп|д|дом|кв|мкр|корп|к|стр|пер|б-р|бул|ш|пл|эт|под))`;
+const END = String.raw`(?=;|\n|${ABBR}\.\s+[А-ЯЁA-Z]|\.?$)`;
+const grab = (text: string, re: RegExp) => (text.match(re)?.[1] ?? "").trim().replace(/[.,]$/, "").slice(0, 200);
+
+export function parseNote(note: string) {
+  const t = note ?? "";
+  return {
+    address: grab(t, new RegExp(String.raw`адрес[уa]?\s*[:—-]?\s*(.+?)${END}`, "i")),
+    area: grab(t, /(\d{1,4}(?:[.,]\d+)?)\s*(?:м²|м2|кв\.?\s*м)/i),
+    rooms: grab(t, /(\d{1,2})\s*-?\s*(?:комн|к\b|-?комнатн)/i),
+    district: grab(t, /(?:мкр\.?|микрорайон|район)\s*[:—-]?\s*([^,.;\n]{2,60})/i),
+    notes: grab(t, new RegExp(String.raw`пожелани[еяй]\S*\s*[:—-]?\s*(.+?)${END}`, "i")),
+  };
+}
+
 // Сделка → поля заказа или список того, чего не хватает
 function mapDeal(deal: Deal): { order?: Record<string, unknown>; missing: string[] } {
   const missing: string[] = [];
-  const address = pick(deal, "address");
-  const area = Math.round(num(pick(deal, "area")));
-  const roomsRaw = pick(deal, "rooms");
+  const note = parseNote(deal.contact?.notes ?? "");
+  const address = pick(deal, "address") || note.address;
+  const area = Math.round(num(pick(deal, "area") || note.area));
+  const roomsRaw = pick(deal, "rooms") || note.rooms;
   const rooms = roomsRaw ? Math.round(num(roomsRaw)) : null;
   const price = deal.amount == null ? NaN : Math.round(Number(deal.amount));
   const payoutRaw = pick(deal, "payout");
@@ -75,8 +94,8 @@ function mapDeal(deal: Deal): { order?: Record<string, unknown>; missing: string
   if (!deal.scheduledAt) missing.push("дата и время записи");
   else if (new Date(deal.scheduledAt).getTime() < Date.now()) missing.push("дата записи в будущем");
   if (!Number.isFinite(price)) missing.push("сумма сделки");
-  if (!address) missing.push(`поле «${FIELDS.address[0]}»`);
-  if (!(area > 0)) missing.push(`поле «${FIELDS.area[0]}» (число м²)`);
+  if (!address) missing.push("адрес (поле «Адрес» или «адрес: …» в заметке о клиенте)");
+  if (!(area > 0)) missing.push("площадь (поле «Площадь» или «80 м²» в заметке о клиенте)");
   if (roomsRaw && !Number.isFinite(rooms)) missing.push(`поле «${FIELDS.rooms[0]}» — число`);
   if (!Number.isFinite(payout)) missing.push(`поле «${FIELDS.payout[0]}»${PAYOUT_PERCENT ? "" : " (или настройте процент)"}`);
   if (missing.length) return { missing };
@@ -86,14 +105,15 @@ function mapDeal(deal: Deal): { order?: Record<string, unknown>; missing: string
     order: {
       crm_deal_id: deal.id,
       crm_deal_number: deal.number ?? null,
-      district: pick(deal, "district") || "район не указан",
+      district: pick(deal, "district") || note.district || "район не указан",
       address,
       area_m2: area,
       rooms,
       scheduled_at: new Date(deal.scheduledAt).toISOString(),
       price_client: price,
       payout_cleaner: payout,
-      notes: pick(deal, "notes") || null,
+      // Видны клинерам в ленте до взятия заказа — только пожелания, не вся заметка (там адрес и телефон)
+      notes: pick(deal, "notes") || note.notes || null,
     },
   };
 }
@@ -145,7 +165,7 @@ async function loadDeal(number: number): Promise<Deal | null> {
   return {
     id: d.id, number: d.number, status: d.status, title: null,
     amount: d.amount ?? null, scheduledAt: d.scheduledAt ?? null,
-    contact: { name: d.client ?? null, phone: d.phone ?? null, customFields },
+    contact: { name: d.client ?? null, phone: d.phone ?? null, notes: d.clientNotes ?? "", customFields },
   };
 }
 
@@ -180,7 +200,7 @@ export async function importFromCrm(): Promise<number> {
     });
     const sent = await broadcastOrder(o);
     await notifyAdmins(
-      `📥 Заказ из CRM (сделка #${deal.number ?? "?"}):\n${orderLine(o)}\nКлиенту ${money(o.price_client)} · разослан клинерам: ${sent}\n\nСсылка для клиента (отправьте в WhatsApp):\nhttps://t.me/${BOT_USERNAME}?start=c_${client.link_token}`,
+      `📥 Заказ из CRM (сделка #${deal.number ?? "?"}):\n${orderLine(o)}\nАдрес: ${esc(o.address)}${o.rooms ? ` · комнат: ${o.rooms}` : ""}${o.notes ? `\nПожелания: ${esc(o.notes)}` : ""}\nКлиенту ${money(o.price_client)} · разослан клинерам: ${sent}\nПроверьте, что всё распознано верно.\n\nСсылка для клиента (отправьте в WhatsApp):\nhttps://t.me/${BOT_USERNAME}?start=c_${client.link_token}`,
     );
     created++;
   }
