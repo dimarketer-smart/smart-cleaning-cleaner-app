@@ -1,8 +1,8 @@
 // Импорт заказов из сделок CRM Big Prodast. Запускается из cron раз в 10 минут.
-// Сделка на этапе CRM_STAGE_ID → заказ в ленте клинеров (один раз на сделку).
+// Сделка на этапе CRM_STAGE → заказ в ленте клинеров (один раз на сделку).
 import { BOT_USERNAME, db, esc, money, notifyAdmins } from "./util.ts";
 import { broadcastOrder, orderLine } from "./flows.ts";
-import { crm, CRM_API_KEY, CRM_STAGE_ID } from "./crm_api.ts";
+import { CRM_API_KEY, CRM_STAGE, crmTool } from "./crm_api.ts";
 
 // Названия доп. полей в CRM. Сравнение без регистра; подходит поле, чьё название совпадает или начинается с варианта.
 // Переопределяется секретом CRM_FIELDS, например {"address":["Адрес уборки"],"payout":["Клинеру"]}.
@@ -119,18 +119,48 @@ async function reportIssue(deal: Deal, reason: string) {
   await notifyAdmins(`⚠️ Сделка #${deal.number ?? "?"} ${who} стоит на этапе импорта, но заказ не создан.\nНе хватает: ${esc(reason)}\nПоправьте сделку в CRM — через 10 минут попробую снова.`);
 }
 
-export async function importFromCrm(): Promise<number> {
-  if (!CRM_API_KEY || !CRM_STAGE_ID) return 0;
-  const deals: Deal[] = await crm(`/deals?stageId=${encodeURIComponent(CRM_STAGE_ID)}`);
-  if (!deals?.length) return 0;
+// Открытые сделки на этапе (find_deals ищет по части названия — отсекаем чужие этапы)
+async function dealsOnStage(stage: string) {
+  const res = await crmTool("find_deals", { period: "all_time", status: "open", stageName: stage });
+  if (res?.truncated) console.warn("crm find_deals: список обрезан", res.shown, "из", res.total);
+  // deno-lint-ignore no-explicit-any
+  return ((res?.deals ?? []) as any[]).filter((d) => String(d.stage ?? "").trim().toLowerCase() === stage.toLowerCase());
+}
 
-  const ids = deals.map((d) => d.id);
+// Полная сделка: карточка сделки + доп. поля из карточки клиента, в одном виде с REST API
+async function loadDeal(number: number): Promise<Deal | null> {
+  const card = await crmTool("deal_card", { number });
+  const d = card?.deal;
+  if (!d) return null;
+  let customFields: Field[] = [];
+  const query = d.phone || d.client;
+  if (query && d.contactId) {
+    const cc = await crmTool("contact_card", { query });
+    // deno-lint-ignore no-explicit-any
+    const c = (cc?.contacts ?? []).find((x: any) => x.id === d.contactId);
+    customFields = c?.customFields ?? [];
+  }
+  return {
+    id: d.id, number: d.number, status: d.status, title: null,
+    amount: d.amount ?? null, scheduledAt: d.scheduledAt ?? null,
+    contact: { name: d.client ?? null, phone: d.phone ?? null, customFields },
+  };
+}
+
+export async function importFromCrm(): Promise<number> {
+  if (!CRM_API_KEY || !CRM_STAGE) return 0;
+  const list = await dealsOnStage(CRM_STAGE);
+  if (!list.length) return 0;
+
+  const ids = list.map((d) => d.id);
   const { data: existing } = await db.from("orders").select("crm_deal_id").in("crm_deal_id", ids);
   const done = new Set((existing ?? []).map((r) => r.crm_deal_id));
 
   let created = 0;
-  for (const deal of deals) {
-    if (done.has(deal.id) || deal.status !== "open") continue;
+  for (const item of list) {
+    if (done.has(item.id)) continue;
+    const deal = await loadDeal(item.number);
+    if (!deal || deal.status !== "open") continue;
     const { order, missing } = mapDeal(deal);
     if (!order) { await reportIssue(deal, missing.join(", ")); continue; }
 
@@ -154,38 +184,33 @@ export async function importFromCrm(): Promise<number> {
   return created;
 }
 
-// Справка для настройки: воронки, этапы и названия доп. полей в открытых сделках. Значения полей не отдаём.
+// Справка для настройки: этапы, сколько на них сделок и названия доп. полей у клиентов сделок на этапе импорта
+// (или у первых открытых сделок). Значения полей и данные клиентов не отдаём.
 export async function discoverCrm() {
-  const [pipelines, stages, deals] = await Promise.all([crm("/pipelines"), crm("/stages"), crm("/deals")]);
+  const [dir, funnel] = await Promise.all([crmTool("crm_directory"), crmTool("funnel")]);
+  // deno-lint-ignore no-explicit-any
+  const counts = new Map<string, number>((funnel?.stages ?? []).map((s: any) => [s.stage, s.deals]));
+  const sample = CRM_STAGE
+    ? await dealsOnStage(CRM_STAGE)
+    : ((await crmTool("find_deals", { period: "all_time", status: "open", sort: "created_desc" }))?.deals ?? []);
   const labels: Record<string, number> = {};
-  for (const d of deals ?? []) {
-    for (const f of fieldsOf(d)) {
+  let withSchedule = 0, withAmount = 0, checked = 0;
+  for (const item of sample.slice(0, 10)) {
+    const deal = await loadDeal(item.number);
+    if (!deal) continue;
+    checked++;
+    if (deal.scheduledAt) withSchedule++;
+    if (deal.amount != null) withAmount++;
+    for (const f of fieldsOf(deal)) {
       const l = (f.label ?? "").trim();
       if (l) labels[l] = (labels[l] ?? 0) + 1;
     }
   }
-  // deno-lint-ignore no-explicit-any
-  const stageView = (s: any) => ({
-    id: s.id, name: s.name, closesAs: s.closesAs, requiredFields: s.requiredFields,
-    // deno-lint-ignore no-explicit-any
-    openDeals: (deals ?? []).filter((d: any) => d.stageId === s.id).length,
-  });
   return {
-    pipelines: [
-      // deno-lint-ignore no-explicit-any
-      ...(pipelines ?? []).map((p: any) => ({
-        // deno-lint-ignore no-explicit-any
-        name: p.name, stages: (stages ?? []).filter((s: any) => s.pipelineId === p.id).map(stageView),
-      })),
-      // deno-lint-ignore no-explicit-any
-      { name: "(общий входящий)", stages: (stages ?? []).filter((s: any) => !s.pipelineId).map(stageView) },
-    ],
-    openDeals: deals?.length ?? 0,
     // deno-lint-ignore no-explicit-any
-    dealsWithSchedule: (deals ?? []).filter((d: any) => d.scheduledAt).length,
-    // deno-lint-ignore no-explicit-any
-    dealsWithAmount: (deals ?? []).filter((d: any) => d.amount != null).length,
+    stages: (dir?.stages ?? []).map((s: any) => ({ name: s.name, openDeals: counts.get(s.name) ?? 0, closesAs: s.closesAs })),
+    sample: { stage: CRM_STAGE || "(последние открытые)", checked, withSchedule, withAmount },
     customFieldLabels: labels,
-    config: { stageId: CRM_STAGE_ID || null, fields: FIELDS, payoutPercent: PAYOUT_PERCENT || null },
+    config: { stage: CRM_STAGE || null, fields: FIELDS, payoutPercent: PAYOUT_PERCENT || null },
   };
 }
