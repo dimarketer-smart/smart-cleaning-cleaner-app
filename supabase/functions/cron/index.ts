@@ -21,7 +21,11 @@ Deno.serve(async (req) => {
   }
   const log: string[] = [];
   const run = async (name: string, fn: () => Promise<number>) => {
-    try { log.push(`${name}: ${await fn()}`); } catch (e) { console.error(name, e); log.push(`${name}: error`); }
+    try { log.push(`${name}: ${await fn()}`); } catch (e) {
+      console.error(name, e);
+      // deno-lint-ignore no-explicit-any
+      log.push(`${name}: error — ${(e as any)?.message ?? JSON.stringify(e)}`);
+    }
   };
 
   const now = new Date();

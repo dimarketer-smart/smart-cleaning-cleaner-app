@@ -110,11 +110,13 @@ async function findOrCreateClient(name: string | null, phone: string | null) {
 }
 
 async function reportIssue(deal: Deal, reason: string) {
-  const { data: prev } = await db.from("crm_import_issues").select("reason").eq("deal_id", deal.id).maybeSingle();
+  const { data: prev, error: e1 } = await db.from("crm_import_issues").select("reason").eq("deal_id", deal.id).maybeSingle();
+  if (e1) throw e1;
   if (prev?.reason === reason) return; // уже писали ровно об этом
-  await db.from("crm_import_issues").upsert({
+  const { error: e2 } = await db.from("crm_import_issues").upsert({
     deal_id: deal.id, deal_number: deal.number ?? null, reason, updated_at: new Date().toISOString(),
   });
+  if (e2) throw e2;
   const who = [deal.contact?.name, deal.title].filter(Boolean).map(esc).join(" · ");
   await notifyAdmins(`⚠️ Сделка #${deal.number ?? "?"} ${who} стоит на этапе импорта, но заказ не создан.\nНе хватает: ${esc(reason)}\nПоправьте сделку в CRM — через 10 минут попробую снова.`);
 }
@@ -153,7 +155,8 @@ export async function importFromCrm(): Promise<number> {
   if (!list.length) return 0;
 
   const ids = list.map((d) => d.id);
-  const { data: existing } = await db.from("orders").select("crm_deal_id").in("crm_deal_id", ids);
+  const { data: existing, error: exErr } = await db.from("orders").select("crm_deal_id").in("crm_deal_id", ids);
+  if (exErr) throw exErr;
   const done = new Set((existing ?? []).map((r) => r.crm_deal_id));
 
   let created = 0;
