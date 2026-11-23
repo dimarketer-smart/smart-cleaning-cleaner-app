@@ -3,6 +3,7 @@
 import { db, esc, localParts, notifyAdmins, send } from "../_shared/util.ts";
 import { acceptOrder, orderLine, releaseOrder } from "../_shared/flows.ts";
 import { discoverCrm, importFromCrm } from "../_shared/crm.ts";
+import { retryCrmSync } from "../_shared/crm_api.ts";
 
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const H = 3_600_000;
@@ -33,6 +34,8 @@ Deno.serve(async (req) => {
   const tomorrow = localParts(new Date(now.getTime() + 24 * H)).date;
   // Новые сделки из CRM → заказы в ленте
   await run("crm_import", importFromCrm);
+  // Повтор переносов сделок, которые не удались при смене статуса
+  await run("crm_sync_retry", retryCrmSync);
 
   const cleanerTg = async (id: string) =>
     (await db.from("cleaners").select("tg_id").eq("id", id).maybeSingle()).data?.tg_id as number | undefined;

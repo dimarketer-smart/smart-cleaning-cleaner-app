@@ -2,7 +2,7 @@
 // Сделка на этапе CRM_STAGE → заказ в ленте клинеров (один раз на сделку).
 import { BOT_USERNAME, db, esc, money, notifyAdmins } from "./util.ts";
 import { broadcastOrder, orderLine } from "./flows.ts";
-import { CRM_API_KEY, CRM_STAGE, crmTool } from "./crm_api.ts";
+import { CRM_API_KEY, CRM_STAGE, crmTool, stageName } from "./crm_api.ts";
 
 // Названия доп. полей в CRM. Сравнение без регистра; подходит поле, чьё название совпадает или начинается с варианта.
 // Переопределяется секретом CRM_FIELDS, например {"address":["Адрес уборки"],"payout":["Клинеру"]}.
@@ -142,7 +142,9 @@ async function reportIssue(deal: Deal, reason: string) {
 }
 
 // Открытые сделки на этапе (find_deals ищет по части названия — отсекаем чужие этапы)
-async function dealsOnStage(stage: string) {
+async function dealsOnStage(idOrName: string) {
+  const stage = await stageName(idOrName);
+  if (!stage) throw new Error(`в CRM нет этапа ${idOrName} (секрет CRM_STAGE)`);
   const res = await crmTool("find_deals", { period: "all_time", status: "open", stageName: stage });
   if (res?.truncated) console.warn("crm find_deals: список обрезан", res.shown, "из", res.total);
   // deno-lint-ignore no-explicit-any
