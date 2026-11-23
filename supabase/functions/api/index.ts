@@ -4,6 +4,7 @@ import { BOT_USERNAME, db, localParts, verifyInitData } from "../_shared/util.ts
 import {
   logEvent, notifyClientOnWay, notifyClientTaken, type Order, releaseOrder, sendForReview, setStatus,
 } from "../_shared/flows.ts";
+import { crmSyncStatus } from "../_shared/crm_api.ts";
 
 const CORS = {
   "access-control-allow-origin": Deno.env.get("WEBAPP_ORIGIN") ?? "*",
@@ -86,6 +87,7 @@ Deno.serve(async (req) => {
         let o = Array.isArray(data) ? data[0] : data;
         if (!o) throw new ApiError("already_taken", 409);
         await logEvent(o, "cleaner", "open", "taken");
+        await crmSyncStatus(o, "taken");
         // Отдельное подтверждение не нужно, если до уборки меньше 12 часов
         // или заказ на завтра взят уже после 18:00 (вечернее напоминание он бы и так получил сейчас)
         const nowLocal = localParts(new Date());

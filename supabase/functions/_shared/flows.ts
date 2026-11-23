@@ -1,5 +1,6 @@
 // Бизнес-логика, общая для api, bot и cron.
 import { ADMIN_IDS, appButton, db, esc, fmtWhen, KASPI_PAY_URL, money, notifyAdmins, send, tg } from "./util.ts";
+import { crmSyncStatus } from "./crm_api.ts";
 
 export type Actor = "cleaner" | "client" | "admin" | "system";
 
@@ -32,6 +33,7 @@ export async function setStatus(
     to_status: to,
     comment: comment ?? null,
   });
+  await crmSyncStatus(data, to);
   return data;
 }
 

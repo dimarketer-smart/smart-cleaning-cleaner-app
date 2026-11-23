@@ -2,6 +2,7 @@
 // Напоминания, снятие неподтверждённых заказов, тревоги админу, автоприёмка через 2 часа.
 import { db, esc, localParts, notifyAdmins, send } from "../_shared/util.ts";
 import { acceptOrder, orderLine, releaseOrder } from "../_shared/flows.ts";
+import { discoverCrm, importFromCrm } from "../_shared/crm.ts";
 
 const CRON_SECRET = Deno.env.get("CRON_SECRET") ?? "";
 const H = 3_600_000;
@@ -9,6 +10,14 @@ const H = 3_600_000;
 Deno.serve(async (req) => {
   if (!CRON_SECRET || req.headers.get("x-cron-secret") !== CRON_SECRET) {
     return new Response("forbidden", { status: 403 });
+  }
+  // Справка для настройки импорта: ?crm=discover — этапы CRM и названия доп. полей (без данных клиентов)
+  if (new URL(req.url).searchParams.get("crm") === "discover") {
+    try {
+      return Response.json(await discoverCrm());
+    } catch (e) {
+      return Response.json({ error: (e as Error).message }, { status: 502 });
+    }
   }
   const log: string[] = [];
   const run = async (name: string, fn: () => Promise<number>) => {
@@ -18,6 +27,9 @@ Deno.serve(async (req) => {
   const now = new Date();
   const local = localParts(now);
   const tomorrow = localParts(new Date(now.getTime() + 24 * H)).date;
+  // Новые сделки из CRM → заказы в ленте
+  await run("crm_import", importFromCrm);
+
   const cleanerTg = async (id: string) =>
     (await db.from("cleaners").select("tg_id").eq("id", id).maybeSingle()).data?.tg_id as number | undefined;
 
