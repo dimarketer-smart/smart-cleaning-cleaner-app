@@ -233,7 +233,7 @@ export async function discoverCrm() {
   }
   return {
     // deno-lint-ignore no-explicit-any
-    stages: (dir?.stages ?? []).map((s: any) => ({ name: s.name, openDeals: counts.get(s.name) ?? 0, closesAs: s.closesAs })),
+    stages: (dir?.stages ?? []).map((s: any) => ({ id: s.id, name: s.name, openDeals: counts.get(s.name) ?? 0, closesAs: s.closesAs })),
     sample: { stage: CRM_STAGE || "(последние открытые)", checked, withSchedule, withAmount },
     customFieldLabels: labels,
     config: { stage: CRM_STAGE || null, fields: FIELDS, payoutPercent: PAYOUT_PERCENT || null },
